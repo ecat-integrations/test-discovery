@@ -1,0 +1,13 @@
+# Test Discovery —— 多类自发现测试桩（合并 import-flow + zeroconf 两类 E2E）
+# - IMPORT_FLOW：事件驱动（INTEGRATIONS_ALL_LOADED）跑本集成自包含 import-flow E2E。
+# - ZEROCONF：广播 mDNS + 发现→HTTP 探活(probe)→确认(3步flow) + 仿真设备 + 自验证闭环。
+# 依赖 ecat-core + integration-zeroconf（mDNS 监听/broker + ZeroconfSubscription 类型）
+#         + integration-httpserver（zeroconf 闭环受探 HTTP server：ProbeHttpServer）。
+requires_core: ^2.0.0
+dependencies:
+  - artifactId: integration-zeroconf
+    groupId: com.ecat
+    version: ^2.0.0
+  - artifactId: integration-httpserver
+    groupId: com.ecat
+    version: ^2.0.0
