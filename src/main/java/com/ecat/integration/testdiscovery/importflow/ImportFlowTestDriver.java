@@ -23,6 +23,7 @@ import com.ecat.core.Integration.IntegrationDeviceBase;
 import com.ecat.core.Utils.Log;
 import com.ecat.core.Utils.LogFactory;
 
+import com.ecat.integration.testdiscovery.zeroconf.ProbeHttpServer;
 import com.ecat.integration.testdiscovery.zeroconf.TestDiscoverySimulatedDevice;
 
 import java.io.FileWriter;
@@ -36,7 +37,7 @@ import java.util.Map;
  * <p>经 {@code core.getConfigFlowService().startDiscoveryFlow(coordinate, IMPORT_FLOW, payload)} 触发本集成 flow：
  * discovery 步解析 payload → 落 confirm 步 → 驱动方 submitStep(confirm) → createEntry → 仿真设备加载上报。
  *
- * <p>与 {@link com.ecat.integration.testdiscovery.zeroconf.ZeroconfTestLoop} 对称——一个测 IMPORT_FLOW、
+ * <p>与 {@link com.ecat.integration.testdiscovery.zeroconf.ZeroconfDemoDriver} 对称——一个测 IMPORT_FLOW、
  * 一个测 ZEROCONF，都创建 {@link TestDiscoverySimulatedDevice}。
  *
  * <p>由入口在 {@link com.ecat.core.Bus.BusTopic#INTEGRATIONS_ALL_LOADED} 后调用 {@link #runE2E()}。
@@ -81,9 +82,10 @@ public class ImportFlowTestDriver {
         }
 
         try {
-            // 1. 触发本集成自己的 import-flow：payload.data = model|sn|name（v1）
+            // 1. 触发本集成自己的 import-flow：payload.data = model|sn|name|account|password（v1，凭证取自 ProbeHttpServer 常量=单一真相源）
             ImportFlowPayload payload = new ImportFlowPayload(COORDINATE, 1,
-                    TEST_MODEL + "|" + TEST_SN + "|" + "test-discovery import-flow " + TEST_SN);
+                    TEST_MODEL + "|" + TEST_SN + "|" + "test-discovery import-flow " + TEST_SN
+                            + "|" + ProbeHttpServer.AUTH_ACCOUNT + "|" + ProbeHttpServer.AUTH_PASSWORD);
             ConfigFlowInstance inst = service.startDiscoveryFlow(COORDINATE, SourceType.IMPORT_FLOW, payload);
             String flowId = inst.getFlowId();
             log.info("[test-discovery] import-flow 1/3 init: flowId={}, step={}, type={}",

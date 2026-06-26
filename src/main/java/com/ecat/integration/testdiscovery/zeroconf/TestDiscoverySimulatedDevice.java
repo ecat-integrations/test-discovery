@@ -16,18 +16,17 @@ import com.ecat.core.State.AttributeClass;
 import com.ecat.core.State.AttributeStatus;
 import com.ecat.core.State.FloatAttribute;
 
-import java.util.Random;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 仿真设备（zeroconf 闭环的"设备运行"半边）。
- * <p>由 {@code TestDiscoveryIntegration.createDeviceFromEntry} 在 ZEROCONF 发现入网后构造；
- * {@code start()} 起周期轮询，生成仿真环境量（temperature/humidity/rssi）并发布，deviceStatus 置 NORMAL，
- * 完成"发现→入网→设备在线→数据上报"闭环。
+ * 仿真设备（zeroconf 闭环的"设备运行"半边）——用入网凭证访问 {@link ProbeHttpServer} 拉取数据上报。
+ * <p>由 {@code TestDiscoveryIntegration.createDeviceFromEntry} 在发现入网后构造；{@code start()} 从 entry
+ * 读 account/password/ip/port，起周期轮询带 HTTP Basic Auth 真连 {@code GET /data}，解析
+ * temperature/humidity/rssi 并发布，deviceStatus 置 NORMAL——完成"发现→凭证→入网→凭证拉数据"真实闭环。
  *
- * <p>纯内存仿真、无硬件依赖：每 {@link #POLL_INTERVAL_SEC} 秒生成 temperature≈25±5°C、humidity≈50±15%、
- * rssi≈-55±10dBm（带随机扰动），经 {@link #publicAttrsState()} 发布到 DEVICE_DATA_UPDATE 总线。
+ * <p>拉取失败（401 凭证无效 / 不可达 / 解析失败）→ deviceStatus 置 OFFLINE（不静默兜底、不编造数据）。
+ * entry 缺凭证/地址（异常）→ 不起轮询、保持 OFFLINE 并日志告警。
  *
  * @author coffee
  */
@@ -35,15 +34,19 @@ public class TestDiscoverySimulatedDevice extends DeviceBase {
 
     private static final long POLL_INTERVAL_SEC = 5L;
 
-    private final Random rnd = new Random();
-
     private FloatAttribute temperatureAttr;
     private FloatAttribute humidityAttr;
     private FloatAttribute rssiAttr;
     private ScheduledFuture<?> pollTask;
 
+    /** 访问 /data 的账号/密码/地址——start() 从 entry 读，缺失则不起轮询（OFFLINE）。*/
+    private String account;
+    private String password;
+    private String ip;
+    private int port;
+
     public TestDiscoverySimulatedDevice(ConfigEntry entry) {
-        super(entry); // 存储 entry/config，提取 name/sn/model/vendor
+        super(entry); // 存储 entry/config，提取 name/sn/model/vendor；凭证在 start() 读
     }
 
     @Override
@@ -65,28 +68,42 @@ public class TestDiscoverySimulatedDevice extends DeviceBase {
         if (pollTask != null) {
             return;
         }
+        // 从 entry 读访问凭证/地址（凭证由 flow 写入 entryData→entry.data；config 即 entry.getData()）
+        this.account = (String) config.get("account");
+        this.password = (String) config.get("password");
+        this.ip = (String) config.get("ip");
+        Object portObj = config.get("port");
+        if (account == null || password == null || ip == null || !(portObj instanceof Number)) {
+            // 入网凭证/地址缺失属异常（flow 应已写入），不起轮询、保持 OFFLINE 并明确告警（不兜底）
+            log.error("[test-discovery-device] 入网凭证/地址缺失，无法拉取数据: account={}, ip={}, port={} (entry uniqueId={})",
+                    account, ip, portObj, getEntry().getUniqueId());
+            this.deviceStatus = DeviceStatus.OFFLINE;
+            return;
+        }
+        this.port = ((Number) portObj).intValue();
         // 直接字段赋值（DeviceBase.deviceStatus 为 protected）；自管理状态须 override computeDeviceStatus
         this.deviceStatus = DeviceStatus.NORMAL;
-        log.info("[test-discovery-device] start: 仿真轮询已启动，间隔 {}s", POLL_INTERVAL_SEC);
+        log.info("[test-discovery-device] start: 凭证拉取轮询已启动 {}s/次, ip={}:{}", POLL_INTERVAL_SEC, ip, port);
         pollTask = getScheduledExecutor().scheduleAtFixedRate(
-                this::generateData, 0, POLL_INTERVAL_SEC, TimeUnit.SECONDS);
+                this::pullDataFromService, 0, POLL_INTERVAL_SEC, TimeUnit.SECONDS);
     }
 
-    /** 生成一轮仿真数据并发布。 */
-    private void generateData() {
-        try {
-            float temp = 25f + (rnd.nextFloat() * 10f - 5f);      // 20~30°C
-            float hum = 50f + (rnd.nextFloat() * 30f - 15f);      // 35~65%
-            float rssi = -55f + (rnd.nextFloat() * 20f - 10f);    // -65~-45 dBm
-            temperatureAttr.updateValue(temp, AttributeStatus.NORMAL);
-            humidityAttr.updateValue(hum, AttributeStatus.NORMAL);
-            rssiAttr.updateValue(rssi, AttributeStatus.NORMAL);
-            publicAttrsState(); // 发布到 DEVICE_DATA_UPDATE 总线（前端/订阅者可见）
-            this.deviceStatus = DeviceStatus.NORMAL;
-            log.debug("[test-discovery-device] 仿真数据: temp=" + temp + " hum=" + hum + " rssi=" + rssi);
-        } catch (Exception e) {
-            log.error("[test-discovery-device] 仿真轮询异常", e);
+    /** 周期凭证拉取 /data：成功→解析上报 + NORMAL；失败(401/不可达/解析失败)→OFFLINE。 */
+    private void pullDataFromService() {
+        ProbeHttpClient.SensorData data = ProbeHttpClient.pullData(ip, port, account, password);
+        if (data == null) {
+            // 凭证无效 / 不可达 / 解析失败 → 设备离线（不静默兜底、不编造数据）
+            this.deviceStatus = DeviceStatus.OFFLINE;
+            log.warn("[test-discovery-device] 拉取 /data 失败（凭证无效或不可达），设备置 OFFLINE: ip={}:{}", ip, port);
+            return;
         }
+        temperatureAttr.updateValue(data.temperature, AttributeStatus.NORMAL);
+        humidityAttr.updateValue(data.humidity, AttributeStatus.NORMAL);
+        rssiAttr.updateValue(data.rssi, AttributeStatus.NORMAL);
+        publicAttrsState(); // 发布到 DEVICE_DATA_UPDATE 总线（前端/订阅者可见）
+        this.deviceStatus = DeviceStatus.NORMAL;
+        log.debug("[test-discovery-device] 凭证拉取数据: temp={} hum={} rssi={}",
+                data.temperature, data.humidity, data.rssi);
     }
 
     @Override

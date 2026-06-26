@@ -18,13 +18,18 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 
 /**
- * probe 步的探活客户端：真连 {@code http://ip:port/identify}，解析 JSON，校验 model/sn 与预期一致。
+ * zeroconf 闭环的 HTTP 客户端：探活（{@link #probe}）+ 凭证拉数据（{@link #pullData}）。
  *
- * <p>用途：discovery 命中后，flow 的 probe 步用预填的 ip/port + TXT 声明的 model/sn 调用
- * {@link #probe}——只信应答、不只信广播。任何失败（连接拒绝/超时/状态码非 200/JSON 缺字段/值不符）
- * 一律返回 {@code false}，由调用方按 ABORT 处理（严格模式：不兜底、不静默入网）。
+ * <p>{@link #probe}：discovery 命中后，flow 的 probe 步用预填的 ip/port + TXT 声明的 model/sn 调用，
+ * 真连 {@code http://ip:port/identify}——只信应答、不只信广播。任何失败（连接拒绝/超时/状态码非 200/
+ * JSON 缺字段/值不符）一律返回 {@code false}（严格模式：不兜底、不静默入网）。
+ *
+ * <p>{@link #pullData}：入网后的仿真设备用 entry 内的账号密码带 HTTP Basic Auth 真连
+ * {@code http://ip:port/data}，拉取传感器数据（temperature/humidity/rssi）——构成"凭证访问设备拉数据"
+ * 的真实示例。凭证无效(401)/不可达/解析失败 → 返回 null（设备置 OFFLINE，不静默兜底）。
  *
  * <p>纯 JDK {@link HttpURLConnection} + fastjson2，无外部依赖。
  *
@@ -73,6 +78,62 @@ public final class ProbeHttpClient {
             if (conn != null) {
                 conn.disconnect();
             }
+        }
+    }
+
+    /**
+     * 凭证拉数据：带 HTTP Basic Auth GET {@code http://ip:port/data}，解析 {temperature,humidity,rssi}。
+     *
+     * @param ip       设备地址（entry 内，zeroconf 来自 discovery、import-flow 为 127.0.0.1）
+     * @param port     设备端口（= {@link ProbeHttpServer#PORT}）
+     * @param account  访问账号（用户在凭证步输入 / import payload 携带）
+     * @param password 访问密码
+     * @return 解析后的传感器数据；HTTP 非 200（含 401 凭证无效）/ 不可达 / 解析失败 → null
+     */
+    public static SensorData pullData(String ip, int port, String account, String password) {
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL("http://" + ip + ":" + port + ProbeHttpServer.DATA_PATH);
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            conn.setReadTimeout(READ_TIMEOUT_MS);
+            conn.setRequestMethod("GET");
+            String basic = Base64.getEncoder().encodeToString(
+                    (account + ":" + password).getBytes(StandardCharsets.UTF_8));
+            conn.setRequestProperty("Authorization", "Basic " + basic);
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                return null; // 401 凭证无效 / 其他非 200 → 拉取失败
+            }
+            String body;
+            try (InputStream is = conn.getInputStream()) {
+                body = readAll(is);
+            }
+            JSONObject json = JSON.parseObject(body);
+            return new SensorData(
+                    json.getFloatValue("temperature"),
+                    json.getFloatValue("humidity"),
+                    json.getFloatValue("rssi"));
+        } catch (Exception e) {
+            // 不可达 / 超时 / 解析失败 → 拉取失败（设备置 OFFLINE）
+            return null;
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
+    /** {@code /data} 应答解析出的传感器读数（final 字段，强类型承载）。*/
+    public static final class SensorData {
+        public final float temperature;
+        public final float humidity;
+        public final float rssi;
+
+        public SensorData(float temperature, float humidity, float rssi) {
+            this.temperature = temperature;
+            this.humidity = humidity;
+            this.rssi = rssi;
         }
     }
 

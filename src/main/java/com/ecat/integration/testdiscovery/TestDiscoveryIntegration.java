@@ -21,34 +21,36 @@ import com.ecat.core.Integration.IntegrationLoadOption;
 import com.ecat.integration.testdiscovery.importflow.ImportFlowTestDriver;
 import com.ecat.integration.testdiscovery.zeroconf.ProbeHttpServer;
 import com.ecat.integration.testdiscovery.zeroconf.TestDiscoverySimulatedDevice;
+import com.ecat.integration.testdiscovery.zeroconf.ZeroconfDemoDriver;
 import com.ecat.integration.testdiscovery.zeroconf.ZeroconfServiceBroadcaster;
-import com.ecat.integration.testdiscovery.zeroconf.ZeroconfTestLoop;
 import com.ecat.integration.zeroconf.ZeroconfDiscoveryIntegration;
 import com.ecat.integration.zeroconf.ZeroconfSubscription;
 
 /**
- * test-discovery：**多类自发现测试桩**——一个模块、两类 discovery 全自包含验证（不依赖外部集成）。
- * <p>两类 E2E：
+ * test-discovery：**自发现测试桩**——一个模块、两类 discovery（IMPORT_FLOW 自动 E2E + ZEROCONF 演示 pending）。
+ *
+ * <p><b>发现 ≠ 添加</b>（见 require/ecat-core-api/15-discovery-add-separation.md）：被动发现的 zeroconf 设备
+ * 只进 pending 列表等用户决策，不自动入网；import_flow 是程序内主动调用，由调用方显式推进 flow 跑完。
+ *
+ * <p>两类 discovery：
  * <ul>
- *   <li><b>IMPORT_FLOW</b>（{@link ImportFlowTestDriver}）：自包含——经 SDK 触发**本集成自己的** import-flow
- *       （discovery 步解析 payload → confirm 步 → createEntry）→ 验本集成设备(source=IMPORT_FLOW)。</li>
- *   <li><b>ZEROCONF</b>（{@link ZeroconfTestLoop}）：自包含闭环——广播 mDNS（端口/TXT 取自 {@link ProbeHttpServer}）→
- *       integration-zeroconf 发现 → 本集成 flow（discovery→<b>probe 真实 HTTP 探活</b>→confirm）→
- *       入网 → 仿真设备上报数据 → verifier 驱动 probe/confirm 两步并验设备(source=ZEROCONF)。
- *       被"发现"的设备即本入口在 {@link #onLoad} 起的 {@link ProbeHttpServer}（受探方）——故 probe 步真连必达。</li>
+ *   <li><b>IMPORT_FLOW 自动 E2E</b>（{@link ImportFlowTestDriver}）：自包含——经 SDK 触发本集成 import-flow
+ *       （discovery 步解析 payload → confirm 步 → createEntry）→ 验本集成设备(source=IMPORT_FLOW)。
+ *       调用方显式 <code>startDiscoveryFlow + submitStep</code>（程序内两步分离，无便捷封装）。</li>
+ *   <li><b>ZEROCONF 演示 pending</b>（{@link ZeroconfDemoDriver}）：广播 mDNS（端口/TXT 取自 {@link ProbeHttpServer}）→
+ *       integration-zeroconf 发现 → core 自动 <code>startDiscoveryFlow(ZEROCONF)</code> → flow 落 probe 步 SHOW_FORM →
+ *       <b>进 pending 等用户</b>。demo driver 仅轮询确认 pending 建立并日志提示，<b>不 submitStep、不验设备</b>——
+ *       真人通过 web /discoveries 点【添加】触发 flow（probe 真连 ProbeHttpServer 验证通讯 → confirm → createEntry）
+ *       或【忽略】。</li>
  * </ul>
- * <p><b>常驻广播（鲁棒性压测）</b>：入口在 {@link #onLoad} 起的 {@link ZeroconfServiceBroadcaster}
- * <b>长期常驻 + 周期重新广播</b>（默认 60s），即使设备已添加也不停——刻意持续制造"已添加设备重复广播"场景，
- * 压测 core 去重（R5/R12）鲁棒性：系统须长期反复正确忽略重复广播（不产重复 entry、不堆孤儿 flow、不刷 WARN）。
+ * <p><b>常驻广播</b>：{@link ZeroconfServiceBroadcaster} 长期常驻 + 周期重新广播（默认 60s），制造重复 discovery 场景——
+ * 验证 core 的 <b>R12 续期</b>（同 payload 重复 discovery 续期现有 flow，非新建）+ <b>IGNORE 抑制</b>（已忽略设备不再进 pending）。
  * </ul>
  * 两种 discovery 各有独立 handler 文件（importflow/ImportFlowDiscoveryHandler、zeroconf/ZeroconfDiscoveryHandler），
  * {@link TestDiscoveryConfigFlow} 只编排（注册 handler + probe/confirm 步），便于按类型单独调整。
  *
- * <p><b>事件驱动（无就绪轮询）</b>：两类测试均由 {@link BusTopic#INTEGRATIONS_ALL_LOADED} 触发——
- * 该事件发出时所有集成已加载（core service 就绪 + integration-zeroconf 就绪），故两类 E2E 可立即跑。
- *
- * <p>"抓 confirm 步 + 等设备数据"仍保留轻量轮询——jmdns 发现→建 flow→confirm 是异步链，
- * 无"flow 到步"事件可订阅，verifier 须轮询捕获后再 submitStep(confirm)。此为异步追赶，非就绪轮询。
+ * <p><b>事件驱动</b>：两类均由 {@link BusTopic#INTEGRATIONS_ALL_LOADED} 触发（此时 core + integration-zeroconf 均就绪）。
+ * demo driver 的 pending 确认轮询是异步追赶（jmdns 发现链异步），非就绪轮询。
  *
  * @author coffee
  */
@@ -62,7 +64,7 @@ public class TestDiscoveryIntegration extends IntegrationDeviceBase {
     public static final String EXPECTED_ZEROCONF_UNIQUE_ID = "testdiscovery_zeroconf001";
 
     private ImportFlowTestDriver importFlowDriver;
-    private ZeroconfTestLoop zeroconfLoop;
+    private ZeroconfDemoDriver zeroconfDemo;
     /** zeroconf 闭环的"被发现的设备"侧（受探 HTTP server）。*/
     private ProbeHttpServer probeServer;
     /** zeroconf 广播方（长期常驻 + 周期重新广播，压测已添加设备重复广播的去重鲁棒性）。*/
@@ -94,16 +96,16 @@ public class TestDiscoveryIntegration extends IntegrationDeviceBase {
         subscribeZeroconf();
 
         importFlowDriver = new ImportFlowTestDriver(core, this);
-        zeroconfLoop = new ZeroconfTestLoop(core, COORDINATE, EXPECTED_ZEROCONF_UNIQUE_ID, this);
+        zeroconfDemo = new ZeroconfDemoDriver(core, EXPECTED_ZEROCONF_UNIQUE_ID);
 
-        // 事件驱动：所有集成加载完后跑两类 E2E（无就绪轮询）
+        // 事件驱动：所有集成加载完后跑 import-flow E2E（自动入网）+ zeroconf demo（进 pending 等用户）
         core.getBusRegistry().subscribe(
             BusTopic.INTEGRATIONS_ALL_LOADED.getTopicName(),
             new EventSubscriber() {
                 @Override
                 public void handleEvent(String topic, Object eventData) {
                     new Thread(importFlowDriver::runE2E, "test-discovery-importflow").start();
-                    new Thread(zeroconfLoop::run, "test-discovery-zeroconf").start();
+                    new Thread(zeroconfDemo::run, "test-discovery-zeroconf").start();
                 }
             }
         );
