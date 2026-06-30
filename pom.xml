@@ -8,12 +8,12 @@
     <parent>
         <groupId>com.ecat</groupId>
         <artifactId>ecat-project</artifactId>
-        <version>1.0.0</version>
+        <version>3.0.0</version>
         <relativePath />
     </parent>
 
     <artifactId>integration-test-discovery</artifactId>
-    <version>2.0.0</version>
+    <version>3.0.0</version>
     <packaging>jar</packaging>
     <name>Test Discovery Integration</name>
     <description>多类自发现测试桩：IMPORT_FLOW（自包含，经 SDK 触发本集成 flow 建设备）+ ZEROCONF（广播+2步flow+仿真设备+自验证闭环）。事件驱动(INTEGRATIONS_ALL_LOADED)，按 discovery 类型拆 handler 文件。</description>
@@ -22,7 +22,7 @@
         <dependency>
             <groupId>com.ecat</groupId>
             <artifactId>ecat-core</artifactId>
-            <version>2.0.0</version>
+            <version>3.0.0</version>
             <scope>provided</scope>
         </dependency>
         <!-- integration-zeroconf：provided（编译期拿 ZeroconfDiscoveryIntegration/ZeroconfSubscription/ZeroconfDiscoveryPayload 类型；
@@ -30,7 +30,7 @@
         <dependency>
             <groupId>com.ecat</groupId>
             <artifactId>integration-zeroconf</artifactId>
-            <version>2.0.0</version>
+            <version>3.0.0</version>
             <scope>provided</scope>
         </dependency>
         <!-- jmdns：compile（打进 fatjar；zeroconf 闭环广播测试服务用）-->
@@ -44,7 +44,7 @@
         <dependency>
             <groupId>com.ecat</groupId>
             <artifactId>integration-httpserver</artifactId>
-            <version>2.0.0</version>
+            <version>3.0.0</version>
             <scope>provided</scope>
         </dependency>
         <!-- fastjson2：provided（ProbeHttpClient 解析 /identify JSON 应答用）。-->

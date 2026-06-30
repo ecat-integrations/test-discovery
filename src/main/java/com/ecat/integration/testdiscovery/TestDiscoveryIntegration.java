@@ -11,6 +11,7 @@ package com.ecat.integration.testdiscovery;
 
 import com.ecat.core.Bus.BusTopic;
 import com.ecat.core.Bus.EventSubscriber;
+import com.ecat.core.Bus.event.BusEvent;
 import com.ecat.core.ConfigEntry.ConfigEntry;
 import com.ecat.core.ConfigFlow.AbstractConfigFlow;
 import com.ecat.core.Device.DeviceBase;
@@ -103,7 +104,7 @@ public class TestDiscoveryIntegration extends IntegrationDeviceBase {
             BusTopic.INTEGRATIONS_ALL_LOADED.getTopicName(),
             new EventSubscriber() {
                 @Override
-                public void handleEvent(String topic, Object eventData) {
+                public void handleEvent(BusEvent<?> event) {
                     new Thread(importFlowDriver::runE2E, "test-discovery-importflow").start();
                     new Thread(zeroconfDemo::run, "test-discovery-zeroconf").start();
                 }
