@@ -157,7 +157,8 @@ public class ImportFlowTestDriver {
                     TestDiscoverySimulatedDevice sim = (TestDiscoverySimulatedDevice) d;
                     boolean online = sim.getDeviceStatus() == DeviceStatus.NORMAL;
                     boolean hasTemp = sim.getAttrs().get("temperature") != null
-                            && sim.getAttrs().get("temperature").getValue() != null;
+                            && sim.getAttrs().get("temperature").getState() != null
+                            && sim.getAttrs().get("temperature").getState().getValue() != null;
                     if (online && hasTemp) {
                         return true;
                     }
