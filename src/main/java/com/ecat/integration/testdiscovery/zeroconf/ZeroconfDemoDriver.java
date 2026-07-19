@@ -42,11 +42,18 @@ public class ZeroconfDemoDriver {
     private static final int CONFIRM_POLL_MAX_SEC = 30;
 
     private final EcatCore core;
+    private final String coordinate;
     private final String expectedUniqueId;
     private final Log log = LogFactory.getLogger(getClass());
 
-    public ZeroconfDemoDriver(EcatCore core, String expectedUniqueId) {
+    /**
+     * @param core            EcatCore 实例
+     * @param coordinate      被发现设备的归属集成坐标（uniqueId 仅在 coordinate 内唯一，查 entry 须域化）
+     * @param expectedUniqueId 期望发现的 uniqueId
+     */
+    public ZeroconfDemoDriver(EcatCore core, String coordinate, String expectedUniqueId) {
         this.core = core;
+        this.coordinate = coordinate;
         this.expectedUniqueId = expectedUniqueId;
     }
 
@@ -86,7 +93,7 @@ public class ZeroconfDemoDriver {
 
         // 未观察到 pending:通常是 entry 已存在(已配置→去重抑制 / 已忽略→IGNORE 抑制),幂等不算失败
         ConfigEntryRegistry reg = core.getEntryRegistry();
-        if (reg != null && reg.getByUniqueId(expectedUniqueId) != null) {
+        if (reg != null && reg.getByUniqueId(coordinate, expectedUniqueId) != null) {
             log.info("[test-discovery] zeroconf demo entry 已存在(已配置/已忽略,发现被抑制),无需演示 pending: uniqueId={}",
                     expectedUniqueId);
             return;

@@ -97,7 +97,7 @@ public class TestDiscoveryIntegration extends IntegrationDeviceBase {
         subscribeZeroconf();
 
         importFlowDriver = new ImportFlowTestDriver(core, this);
-        zeroconfDemo = new ZeroconfDemoDriver(core, EXPECTED_ZEROCONF_UNIQUE_ID);
+        zeroconfDemo = new ZeroconfDemoDriver(core, COORDINATE, EXPECTED_ZEROCONF_UNIQUE_ID);
 
         // 事件驱动：所有集成加载完后跑 import-flow E2E（自动入网）+ zeroconf demo（进 pending 等用户）
         core.getBusRegistry().subscribe(

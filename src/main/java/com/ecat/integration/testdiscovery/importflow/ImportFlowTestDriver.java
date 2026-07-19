@@ -131,7 +131,7 @@ public class ImportFlowTestDriver {
 
     private ConfigEntry getEntry() {
         ConfigEntryRegistry reg = core.getEntryRegistry();
-        return reg != null ? reg.getByUniqueId(EXPECTED_UNIQUE_ID) : null;
+        return reg != null ? reg.getByUniqueId(COORDINATE, EXPECTED_UNIQUE_ID) : null;
     }
 
     private void assertShowForm(ConfigFlowInstance inst, String expectedStep, String msg) {
