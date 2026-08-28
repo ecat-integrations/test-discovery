@@ -15,17 +15,21 @@ import com.ecat.core.Device.DeviceStatus;
 import com.ecat.core.State.AttributeClass;
 import com.ecat.core.State.AttributeStatus;
 import com.ecat.core.State.FloatAttribute;
+import com.ecat.integration.HttpServerIntegration.client.HttpPolling;
+import com.ecat.integration.HttpServerIntegration.client.HttpTarget;
 
-import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
  * 仿真设备（zeroconf 闭环的"设备运行"半边）——用入网凭证访问 {@link ProbeHttpServer} 拉取数据上报。
  * <p>由 {@code TestDiscoveryIntegration.createDeviceFromEntry} 在发现入网后构造；{@code start()} 从 entry
- * 读 account/password/ip/port，起周期轮询带 HTTP Basic Auth 真连 {@code GET /data}，解析
- * temperature/humidity/rssi 并发布，deviceStatus 置 NORMAL——完成"发现→凭证→入网→凭证拉数据"真实闭环。
+ * 读 account/password/ip/port，经 httpserver 客户端 SDK（{@link HttpPolling}）起周期轮询，round 体带
+ * HTTP Basic Auth 真连 {@code GET /data}，解析 temperature/humidity/rssi 并发布，deviceStatus 置
+ * NORMAL——完成"发现→凭证→入网→凭证拉数据"真实闭环。
  *
- * <p>拉取失败（401 凭证无效 / 不可达 / 解析失败）→ deviceStatus 置 OFFLINE（不静默兜底、不编造数据）。
+ * <p>deviceStatus 在 <b>round 完成点</b>迁移：成功轮 → NORMAL；拉取失败（401 凭证无效 / 不可达 /
+ * 解析失败）→ OFFLINE（不静默兜底、不编造数据）；start() 不再乐观置 NORMAL（首轮成功前保持 UNKNOWN）。
  * entry 缺凭证/地址（异常）→ 不起轮询、保持 OFFLINE 并日志告警。
  *
  * @author coffee
@@ -37,7 +41,8 @@ public class TestDiscoverySimulatedDevice extends DeviceBase {
     private FloatAttribute temperatureAttr;
     private FloatAttribute humidityAttr;
     private FloatAttribute rssiAttr;
-    private ScheduledFuture<?> pollTask;
+    /** 幂等标记：SDK Builder 单次使用，重复 start 会建两条轮询链（泄漏）。 */
+    private boolean pollingStarted;
 
     /** 访问 /data 的账号/密码/地址——start() 从 entry 读，缺失则不起轮询（OFFLINE）。*/
     private String account;
@@ -64,8 +69,8 @@ public class TestDiscoverySimulatedDevice extends DeviceBase {
     @Override
     public void start() {
         // 幂等：createEntry() 已 start 一次，IntegrationDeviceBase.onStart() 会再 start 一次；
-        // 防止重复调度出两个轮询任务（每次 start 都 scheduleAtFixedRate 会泄漏）。
-        if (pollTask != null) {
+        // 防止重复建两条轮询链（每次 start 都 on().start() 会泄漏）。
+        if (pollingStarted) {
             return;
         }
         // 从 entry 读访问凭证/地址（凭证由 flow 写入 entryData→entry.data；config 即 entry.getData()）
@@ -81,37 +86,48 @@ public class TestDiscoverySimulatedDevice extends DeviceBase {
             return;
         }
         this.port = ((Number) portObj).intValue();
-        // 直接字段赋值（DeviceBase.deviceStatus 为 protected）；自管理状态须 override computeDeviceStatus
-        this.deviceStatus = DeviceStatus.NORMAL;
+        pollingStarted = true;
+        // 读方向传输轮询走 httpserver 客户端 SDK（W1-2 迁移，取代 getScheduledExecutor 直调）：
+        // SDK 自排周期链（首拍即发、完成点+period 重排），句柄经 RemovalHost(this) 自动绑设备生命周期
+        // （cancelManagedTasks LIFO sweep）——零直调、零手管句柄。round 体 O(1) 发起：阻塞
+        // HttpURLConnection 经 ProbeHttpClient 专用 IO 载体（禁 SDK 定时线程/commonPool/引擎 worker）。
+        HttpPolling.on(this, HttpTarget.of("tdisc-sim-" + getEntry().getUniqueId(),
+                        "http://" + ip + ":" + port + ProbeHttpServer.DATA_PATH))
+                .round(this::pullRound)
+                .every(POLL_INTERVAL_SEC, TimeUnit.SECONDS)
+                .start();
         log.info("[test-discovery-device] start: 凭证拉取轮询已启动 {}s/次, ip={}:{}", POLL_INTERVAL_SEC, ip, port);
-        pollTask = getScheduledExecutor().scheduleAtFixedRate(
-                this::pullDataFromService, 0, POLL_INTERVAL_SEC, TimeUnit.SECONDS);
     }
 
-    /** 周期凭证拉取 /data：成功→解析上报 + NORMAL；失败(401/不可达/解析失败)→OFFLINE。 */
-    private void pullDataFromService() {
-        ProbeHttpClient.SensorData data = ProbeHttpClient.pullData(ip, port, account, password);
-        if (data == null) {
-            // 凭证无效 / 不可达 / 解析失败 → 设备离线（不静默兜底、不编造数据）
-            this.deviceStatus = DeviceStatus.OFFLINE;
-            log.warn("[test-discovery-device] 拉取 /data 失败（凭证无效或不可达），设备置 OFFLINE: ip={}:{}", ip, port);
-            return;
-        }
-        temperatureAttr.updateValue(data.temperature, AttributeStatus.NORMAL);
-        humidityAttr.updateValue(data.humidity, AttributeStatus.NORMAL);
-        rssiAttr.updateValue(data.rssi, AttributeStatus.NORMAL);
-        publicAttrsState(); // 发布到 DEVICE_DATA_UPDATE 总线（前端/订阅者可见）
-        this.deviceStatus = DeviceStatus.NORMAL;
-        log.debug("[test-discovery-device] 凭证拉取数据: temp={} hum={} rssi={}",
-                data.temperature, data.humidity, data.rssi);
+    /**
+     * 一轮凭证拉取 /data（SDK 定时线程上仅 O(1) 发起，IO 在专用载体上执行）：
+     * 成功→解析上报 + NORMAL → true；失败(401/不可达/解析失败)→OFFLINE→false（业务失败统一 warn）。
+     * 包内可见供单测确定性驱动单轮。
+     */
+    CompletableFuture<Boolean> pullRound() {
+        return ProbeHttpClient.pullDataAsync(ip, port, account, password)
+                .thenApply(data -> {
+                    if (data == null) {
+                        // 凭证无效 / 不可达 / 解析失败 → 设备离线（不静默兜底、不编造数据）
+                        this.deviceStatus = DeviceStatus.OFFLINE;
+                        log.warn("[test-discovery-device] 拉取 /data 失败（凭证无效或不可达），设备置 OFFLINE: ip={}:{}", ip, port);
+                        return Boolean.FALSE;
+                    }
+                    temperatureAttr.updateValue(data.temperature, AttributeStatus.NORMAL);
+                    humidityAttr.updateValue(data.humidity, AttributeStatus.NORMAL);
+                    rssiAttr.updateValue(data.rssi, AttributeStatus.NORMAL);
+                    publicAttrsState(); // 发布到 DEVICE_DATA_UPDATE 总线（前端/订阅者可见）
+                    this.deviceStatus = DeviceStatus.NORMAL;
+                    log.debug("[test-discovery-device] 凭证拉取数据: temp={} hum={} rssi={}",
+                            data.temperature, data.humidity, data.rssi);
+                    return Boolean.TRUE;
+                });
     }
 
     @Override
     public void stop() {
-        if (pollTask != null) {
-            pollTask.cancel(false);
-            pollTask = null;
-        }
+        // 轮询句柄经 RemovalHost.onRemove 由 SDK 内绑（start() 时），框架 cancelManagedTasks
+        // sweep 统一收尾——无需自存 handle 与 cancel 样板。
         this.deviceStatus = DeviceStatus.OFFLINE;
     }
 

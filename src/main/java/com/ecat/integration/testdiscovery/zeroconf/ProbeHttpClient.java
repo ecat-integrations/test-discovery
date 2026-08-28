@@ -11,6 +11,7 @@ package com.ecat.integration.testdiscovery.zeroconf;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
+import com.ecat.core.Task.NamedThreadFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -19,9 +20,16 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
- * zeroconf 闭环的 HTTP 客户端：探活（{@link #probe}）+ 凭证拉数据（{@link #pullData}）。
+ * zeroconf 闭环的 HTTP 客户端：探活（{@link #probe}）+ 凭证拉数据（{@link #pullData} 同步 /
+ * {@link #pullDataAsync} 异步）。
  *
  * <p>{@link #probe}：discovery 命中后，flow 的 probe 步用预填的 ip/port + TXT 声明的 model/sn 调用，
  * 真连 {@code http://ip:port/identify}——只信应答、不只信广播。任何失败（连接拒绝/超时/状态码非 200/
@@ -31,6 +39,10 @@ import java.util.Base64;
  * {@code http://ip:port/data}，拉取传感器数据（temperature/humidity/rssi）——构成"凭证访问设备拉数据"
  * 的真实示例。凭证无效(401)/不可达/解析失败 → 返回 null（设备置 OFFLINE，不静默兜底）。
  *
+ * <p>{@link #pullDataAsync}：HttpPolling round 体专用形态——阻塞 HttpURLConnection 经
+ * {@link #IO_CARRIER} 专用载体执行，调用线程（SDK 定时线程 ecat-http-sched）零阻塞，完成语义与
+ * {@link #pullData} 一致（失败完成携带 null，非异常通道）。
+ *
  * <p>纯 JDK {@link HttpURLConnection} + fastjson2，无外部依赖。
  *
  * @author coffee
@@ -39,6 +51,16 @@ public final class ProbeHttpClient {
 
     private static final int CONNECT_TIMEOUT_MS = 3000;
     private static final int READ_TIMEOUT_MS = 3000;
+
+    /**
+     * 凭证拉数据的专用 IO 载体（W1-2 迁移）：阻塞 HttpURLConnection 不许钉 SDK 定时线程
+     * （ecat-http-sched，池仅 2 条且承担全部 http 域定时）、不许 commonPool / 引擎 worker——
+     * 端点死时 3s+3s 超时上界内只占用本载体。fixedDelay 轮询每设备至多 1 在飞轮，
+     * 队列长度天然有界（≤设备数），固定 2 条守护线程足够。daemon：测试/进程退出不滞留。
+     */
+    private static final ExecutorService IO_CARRIER = new ThreadPoolExecutor(
+            2, 2, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(),
+            new NamedThreadFactory("tdisc-probe-io", true));
 
     private ProbeHttpClient() {
     }
@@ -122,6 +144,30 @@ public final class ProbeHttpClient {
                 conn.disconnect();
             }
         }
+    }
+
+    /**
+     * 凭证拉数据的异步形态（HttpPolling round 体专用）：阻塞体 {@link #pullData} 经
+     * {@link #IO_CARRIER} 执行，调用线程零阻塞（SDK round 契约「O(1) 提交或毫秒级组包」）。
+     * 完成语义与 {@link #pullData} 一致：成功完成携带 {@link SensorData}；
+     * 凭证无效(401)/不可达/解析失败 → 完成携带 null（消费方据此置 OFFLINE，非异常通道）。
+     * 载体停机（{@link RejectedExecutionException}）与载体级意外走异常完成，不静默吞。
+     */
+    public static CompletableFuture<SensorData> pullDataAsync(String ip, int port, String account, String password) {
+        CompletableFuture<SensorData> result = new CompletableFuture<>();
+        try {
+            IO_CARRIER.execute(() -> {
+                try {
+                    result.complete(pullData(ip, port, account, password));
+                } catch (Throwable t) {
+                    // pullData 自身已把一切端点失败收口为 null；此处仅承载意外（严格模式：异常外传不吞）
+                    result.completeExceptionally(t);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            result.completeExceptionally(e);
+        }
+        return result;
     }
 
     /** {@code /data} 应答解析出的传感器读数（final 字段，强类型承载）。*/

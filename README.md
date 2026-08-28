@@ -23,8 +23,8 @@
 | `importflow/ImportFlowDiscoveryHandler` | IMPORT_FLOW handler：解析 `payload.data(model\|sn\|name\|account\|password)` → 预填（含凭证/地址）→ 直达 confirm |
 | `zeroconf/ZeroconfDiscoveryHandler` | ZEROCONF handler：解析 TXT(model/sn) → 预填 ip/port/model/sn → 落 probe 步；并构建各步 schema（probe 成功/凭证/确认/探活失败） |
 | `zeroconf/ProbeHttpServer` | **被发现的"设备"侧**：`GET /identify`（无认证，探活）+ `GET /data`（HTTP Basic Auth admin/123，回传感器数据）|
-| `zeroconf/ProbeHttpClient` | 探活客户端（`GET /identify` 校验 model/sn）+ 凭证拉数据客户端（`GET /data` BasicAuth 拉温度/湿度/rssi）|
-| `zeroconf/TestDiscoverySimulatedDevice` | 仿真设备：读 entry 凭证 → 周期 `GET /data`(BasicAuth) 拉数据上报；401/不可达→OFFLINE |
+| `zeroconf/ProbeHttpClient` | 探活客户端（`GET /identify` 校验 model/sn）+ 凭证拉数据客户端（`GET /data` BasicAuth 拉温度/湿度/rssi；`pullDataAsync` 异步形态供轮询 round 用，IO 走专用载体 `tdisc-probe-io`，不占 SDK 定时线程/commonPool）|
+| `zeroconf/TestDiscoverySimulatedDevice` | 仿真设备：读 entry 凭证 → httpserver 客户端 SDK（`HttpPolling.every(5s)`）周期 `GET /data`(BasicAuth) 拉数据上报，NORMAL/OFFLINE 在 round 完成点迁移（401/不可达→OFFLINE）；轮询句柄经 RemovalHost 绑设备生命周期 |
 
 两类 discovery 步骤结构不同：
 - **IMPORT_FLOW**：discovery → 共享 **confirm**（2 步；payload 可信带凭证，无需探活/凭证步）。

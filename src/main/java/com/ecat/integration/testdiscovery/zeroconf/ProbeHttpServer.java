@@ -61,6 +61,18 @@ public class ProbeHttpServer {
 
     private final Random rnd = new Random();
     private EasyHttpServer server;
+    /** 监听端口（默认 {@link #PORT}；包内可覆写供单测用随机端口，不与常驻 demo 冲突）。 */
+    private final int listenPort;
+
+    /** 生产构造：监听广播真相源端口 {@link #PORT}。 */
+    public ProbeHttpServer() {
+        this(PORT);
+    }
+
+    /** 单测构造：随机端口起受探面（避免与常驻 demo 的固定端口冲突）。 */
+    ProbeHttpServer(int listenPort) {
+        this.listenPort = listenPort;
+    }
 
     /**
      * 启动受探 server：监听 {@code 0.0.0.0:PORT}，注册两个端点：
@@ -71,8 +83,10 @@ public class ProbeHttpServer {
      * <p>注意：{@link EasyHttpServer#registerUrl} 要求 undertow 非空，故必须 {@code start()} 后再 register。
      */
     public void start() {
-        server = new EasyHttpServer("0.0.0.0", PORT);
+        server = new EasyHttpServer("0.0.0.0", listenPort);
         server.start();
+        // demo 受探设备：两端点均为内存态直答（常量应答/随机仿真读数），处理线程
+        // 不做任何 IO，无需接入出站车道（本 server 是独立进程面，无宿主执行 API）
         server.registerUrl(IDENTIFY_PATH, "GET", EasyHttpServer.blocking(exchange -> {
             Map<String, Object> body = new HashMap<String, Object>();
             body.put("model", MODEL);
@@ -81,6 +95,11 @@ public class ProbeHttpServer {
             EasyHttpServer.sendJsonResponse(exchange, 200, body);
         }));
         server.registerUrl(DATA_PATH, "GET", EasyHttpServer.blocking(this::handleDataRequest));
+    }
+
+    /** 包内测试访问内部 server（断言路由治理声明）。 */
+    EasyHttpServer getServer() {
+        return server;
     }
 
     /**

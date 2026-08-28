@@ -17,8 +17,8 @@ import javax.jmdns.ServiceInfo;
 
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -60,9 +60,24 @@ public class ZeroconfServiceBroadcaster {
     private volatile boolean running = false;
     private JmDNS jmdns;
     private ServiceInfo serviceInfo;
-    private ScheduledExecutorService scheduler;
+    /** IO 域计时器（注入，生命周期归集成调用方，本类只取消自己的任务、不 shutdown）。*/
+    private final ScheduledExecutorService scheduler;
+    /** 周期重广播任务句柄——stop 时取消。*/
+    private ScheduledFuture<?> reannounceFuture;
     /** service name 自增序号——每次广播用新 name（{@code SERVICE_NAME-<seq>}），让 listener 把它当新服务重新 resolve。*/
     private final AtomicLong nameSeq = new AtomicLong();
+
+    /**
+     * @param timer 本仓自持 IO 域计时器（周期重广播任务体含等 goodbye 2s + jmdns 多播收发，
+     *              阻塞 IO——业务池 IO 禁入，core 引擎 SES 契约面已退役；由集成 onLoad 建、
+     *              onRelease 关停，本类只取消自己的任务、不 shutdown）。非空必需（严格模式）。
+     */
+    public ZeroconfServiceBroadcaster(ScheduledExecutorService timer) {
+        if (timer == null) {
+            throw new IllegalArgumentException("timer 必须非空：周期重广播由集成自持 IO 域计时器承载");
+        }
+        this.scheduler = timer;
+    }
 
     /**
      * 启动广播：注册测试服务 + 起周期重新广播任务。
@@ -77,15 +92,20 @@ public class ZeroconfServiceBroadcaster {
         log.info("[test-discovery] zeroconf 已广播 mDNS 服务: {} port={} (TXT model={}/sn={})",
                 SERVICE_TYPE, ProbeHttpServer.PORT, ProbeHttpServer.MODEL, ProbeHttpServer.SN);
 
-        // 周期重新广播：长期常驻 + 定期刷新，持续压测"已添加设备重复广播"的去重鲁棒性
-        scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "test-discovery-zeroconf-broadcast");
-            t.setDaemon(true);
-            return t;
-        });
-        scheduler.scheduleAtFixedRate(this::reannounce, REANNOUNCE_INTERVAL_SEC, REANNOUNCE_INTERVAL_SEC, TimeUnit.SECONDS);
+        startReannounceSchedule();
         log.info("[test-discovery] zeroconf 周期重新广播已启动，间隔 {}s（持续验证已添加设备重复广播的去重鲁棒性）",
                 REANNOUNCE_INTERVAL_SEC);
+    }
+
+    /**
+     * 在注入的自持计时器上登记周期重广播任务。包内可见供收编回归测试直接驱动
+     * （不依赖 jmdns/多播）。reannounce 内的 goodbye 等待（{@link #GOODBYE_WAIT_MS}）与
+     * jmdns 多播收发都阻塞在本仓自有单线程内（不拖累业务计时/其他集成）。
+     */
+    ScheduledFuture<?> startReannounceSchedule() {
+        reannounceFuture = scheduler.scheduleAtFixedRate(this::reannounce,
+                REANNOUNCE_INTERVAL_SEC, REANNOUNCE_INTERVAL_SEC, TimeUnit.SECONDS);
+        return reannounceFuture;
     }
 
     /**
@@ -120,12 +140,12 @@ public class ZeroconfServiceBroadcaster {
         }
     }
 
-    /** 停止广播（幂等）：停周期任务 + 注销服务 + 关闭 jmdns。*/
+    /** 停止广播（幂等）：取消周期任务（不关共享 core 调度器）+ 注销服务 + 关闭 jmdns。*/
     public void stop() {
         running = false;
-        if (scheduler != null) {
-            scheduler.shutdownNow();
-            scheduler = null;
+        if (reannounceFuture != null) {
+            reannounceFuture.cancel(false);
+            reannounceFuture = null;
         }
         if (jmdns != null) {
             try {

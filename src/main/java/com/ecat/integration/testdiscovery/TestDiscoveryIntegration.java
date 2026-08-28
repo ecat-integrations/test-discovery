@@ -18,6 +18,12 @@ import com.ecat.core.Device.DeviceBase;
 import com.ecat.core.EcatCore;
 import com.ecat.core.Integration.IntegrationDeviceBase;
 import com.ecat.core.Integration.IntegrationLoadOption;
+import com.ecat.core.Task.runner.HostedExecutors;
+
+import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 
 import com.ecat.integration.testdiscovery.importflow.ImportFlowTestDriver;
 import com.ecat.integration.testdiscovery.zeroconf.ProbeHttpServer;
@@ -64,12 +70,22 @@ public class TestDiscoveryIntegration extends IntegrationDeviceBase {
     /** zeroconf 闭环预期 uniqueId（与广播 TXT sn + flow 前缀约定）*/
     public static final String EXPECTED_ZEROCONF_UNIQUE_ID = "testdiscovery_zeroconf001";
 
+    /** import-flow E2E driver 工作道（{@link HostedExecutors#bounded}，宿主=本集成单飞）。 */
+    private final ExecutorService importFlowDriverLane = HostedExecutors.bounded(1, this);
+    /** zeroconf demo driver 工作道（与 import-flow 各自一道：demo 含最长 30s pending 轮询，
+     *  同道会串行拖慢 E2E；拆卸挂集成 onRemove，本类零收尾样板）。 */
+    private final ExecutorService zeroconfDemoLane = HostedExecutors.bounded(1, this);
+
     private ImportFlowTestDriver importFlowDriver;
     private ZeroconfDemoDriver zeroconfDemo;
     /** zeroconf 闭环的"被发现的设备"侧（受探 HTTP server）。*/
     private ProbeHttpServer probeServer;
     /** zeroconf 广播方（长期常驻 + 周期重新广播，压测已添加设备重复广播的去重鲁棒性）。*/
     private ZeroconfServiceBroadcaster broadcaster;
+    /** 本仓自持 zeroconf 重广播计时线程名（IO 型：等 goodbye 2s + 多播收发）。*/
+    static final String ZEROCONF_TIMER_THREAD = "testdiscovery-zeroconf";
+    /** 本仓自持 zeroconf 重广播计时器（onLoad 建、onRelease 关停；broadcaster 只取消自身任务）。*/
+    private ScheduledExecutorService zeroconfTimer;
 
     @Override
     public void onLoad(EcatCore core, IntegrationLoadOption loadOption) {
@@ -85,7 +101,14 @@ public class TestDiscoveryIntegration extends IntegrationDeviceBase {
         // 起 zeroconf 广播方（长期常驻 + 周期重新广播）——与 ProbeHttpServer 同级、集成生命周期内常驻。
         // 即使设备已添加也持续周期广播，刻意制造"已添加设备重复广播"压测 core 去重（R5/R12）鲁棒性。
         // 启动失败不阻断集成加载（test stub 鲁棒性：广播不可用仅影响 zeroconf E2E，不应拖垮 core）。
-        broadcaster = new ZeroconfServiceBroadcaster();
+        // 周期重广播任务体是 IO 型（等 goodbye 2s + jmdns 多播收发），归本仓自持单线程计时器
+        // （业务池 IO 禁入；core 引擎 SES 契约面退役），onRelease 关停。
+        zeroconfTimer = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, ZEROCONF_TIMER_THREAD);
+            t.setDaemon(true);
+            return t;
+        });
+        broadcaster = new ZeroconfServiceBroadcaster(zeroconfTimer);
         try {
             broadcaster.start();
         } catch (Exception e) {
@@ -105,13 +128,29 @@ public class TestDiscoveryIntegration extends IntegrationDeviceBase {
             new EventSubscriber() {
                 @Override
                 public void handleEvent(BusEvent<?> event) {
-                    new Thread(importFlowDriver::runE2E, "test-discovery-importflow").start();
-                    new Thread(zeroconfDemo::run, "test-discovery-zeroconf").start();
+                    // 裸线程收编：两类 driver 各投自有单飞道（O(1) 入队即返，不占 bus 派发线程）。
+                    // 两 driver 各占独立道——zeroconf demo 内含最长 30s 的 pending 确认轮询，
+                    // 若与 import-flow E2E 同道会串行拖慢；分道后互不阻塞。
+                    submitDriver(importFlowDriverLane, "importflow-driver", importFlowDriver::runE2E);
+                    submitDriver(zeroconfDemoLane, "zeroconf-demo", zeroconfDemo::run);
                 }
             }
         );
 
         log.info("[test-discovery] loaded; 已订阅 INTEGRATIONS_ALL_LOADED（事件驱动跑 import-flow + zeroconf 两类 E2E）");
+    }
+
+    /**
+     * driver 投递（自有单飞道）：O(1) 入队即返不占 bus 派发线程；拒绝（道队列满/宿主已
+     * 拆卸 REE）记账即弃——driver 是一次性 E2E 触发，INTEGRATIONS_ALL_LOADED 不会重发，
+     * 丢弃=本次 E2E 未跑（测试桩显式边界，非可重试工作）。
+     */
+    private void submitDriver(ExecutorService lane, String laneName, Runnable driver) {
+        try {
+            lane.execute(driver);
+        } catch (RejectedExecutionException e) {
+            log.warn("[test-discovery] driver 投递拒绝（E2E 未跑）: lane={}, reason={}", laneName, e.getMessage());
+        }
     }
 
     @Override
@@ -135,6 +174,10 @@ public class TestDiscoveryIntegration extends IntegrationDeviceBase {
         if (broadcaster != null) {
             broadcaster.stop();
             broadcaster = null;
+        }
+        if (zeroconfTimer != null) {
+            zeroconfTimer.shutdownNow();
+            zeroconfTimer = null;
         }
         if (probeServer != null) {
             probeServer.stop();
