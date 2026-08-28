@@ -170,7 +170,7 @@ public class TestDiscoveryIntegration extends IntegrationDeviceBase {
     }
 
     @Override
-    public void onRelease() {
+    protected void onDeviceReleaseImpl() {
         if (broadcaster != null) {
             broadcaster.stop();
             broadcaster = null;
@@ -183,7 +183,6 @@ public class TestDiscoveryIntegration extends IntegrationDeviceBase {
             probeServer.stop();
             probeServer = null;
         }
-        super.onRelease();
     }
 
     /**
