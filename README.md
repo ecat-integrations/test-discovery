@@ -85,7 +85,7 @@
 ## 结果查看
 
 - 日志：`logs/core-api.log`，grep `[test-discovery]`（线程 `[test-discovery-importflow]` / `[test-discovery-zeroconf]`）。
-- import-flow 结果：`test-discovery-importflow-e2e-result.txt`。
+- import-flow 结果：`logs/test-discovery-importflow-e2e-result.txt`（本仓 logs/ 下，不落 core cwd 根）。
 - 持久化 entry：coordinate=integration-test-discovery。
 
 ## 如何运行

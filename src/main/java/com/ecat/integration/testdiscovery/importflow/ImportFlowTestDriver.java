@@ -52,7 +52,8 @@ public class ImportFlowTestDriver {
     private static final String EXPECTED_UNIQUE_ID =
             ImportFlowDiscoveryHandler.UNIQUE_ID_PREFIX + TEST_SN;  // testdiscovery_importflow_IMPORTFLOW001
     private static final String CONFIRM_STEP = "confirm";
-    private static final String RESULT_FILE = "test-discovery-importflow-e2e-result.txt";
+    // 报告落本仓 logs/ 下（不污染 core cwd=workspace 根目录；相对路径依赖 core cwd 铁律=workspace 根）
+    private static final String RESULT_FILE = "ecat-integrations/test-discovery/logs/test-discovery-importflow-e2e-result.txt";
 
     private final EcatCore core;
     private final IntegrationDeviceBase integration;
@@ -180,7 +181,14 @@ public class ImportFlowTestDriver {
     }
 
     private void writeReport(String status, String summary) {
-        try (PrintWriter w = new PrintWriter(new FileWriter(RESULT_FILE, false))) {
+        // logs/ 目录防御性确保（正常随仓存在；首跑/清理后兜底创建，失败照旧 warn 不中断自检）
+        java.io.File resultFile = new java.io.File(RESULT_FILE);
+        java.io.File parent = resultFile.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            log.warn("[test-discovery] 报告目录创建失败: {}", parent.getPath());
+            return;
+        }
+        try (PrintWriter w = new PrintWriter(new FileWriter(resultFile, false))) {
             w.println("test-discovery import-flow 自包含 E2E result");
             w.println("status: " + status);
             w.println("uniqueId: " + EXPECTED_UNIQUE_ID);
