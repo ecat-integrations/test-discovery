@@ -12,6 +12,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.Assume;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 /**
@@ -24,10 +25,23 @@ import org.junit.Test;
  * </ol>
  * <p>多播受限时 {@link Assume} 跳过（core 正运行占用多播域时，mvnd fork JVM 多播不通）；机制正确性由 core
  * 端到端 E2E 兜底（见 test-discovery README ②ZEROCONF）。用独立 type {@code _ecat-verify} 避免干扰。
+ * <p>opt-in（依赖多播网络环境=外部资源）：默认 {@code mvn clean install} 整类跳过零耗时；
+ * 显式跑用 {@code mvnd test -Dtest=ZeroconfReannounceVerifyTest -Decat.e2e=true}（container/E2ELifecycleTest 同款 gate）。
  */
 public class ZeroconfReannounceVerifyTest {
 
     private static final String TYPE = "_ecat-verify._tcp.local.";
+
+    /** 整类 opt-in gate：最入口先于任何多播探测/注册判定，避免「先烧 16s 多播探测再 Skip」的白烧。*/
+    @BeforeClass
+    public static void setUpClass() {
+        boolean e2eEnabled = Boolean.getBoolean("ecat.e2e");
+        if (!e2eEnabled) {
+            System.out.println("[INFO] E2E 默认跳过（依赖多播网络环境）。启用：-Decat.e2e=true");
+        }
+        // assumeTrue 失败 → 抛 AssumptionViolatedException → JUnit 整个测试类标记 Skipped（而非 Error）
+        Assume.assumeTrue("E2E 默认不跑（mvn clean install 跳过）；启用用 -Decat.e2e=true", e2eEnabled);
+    }
 
     /** 只统计目标 name 的 serviceResolved 次数（过滤无关服务 + TXT 分阶段都计入）。
      * <p>serviceAdded 时主动 {@code requestServiceInfo}——jmdns 不会自动 resolve，必须主动请求
