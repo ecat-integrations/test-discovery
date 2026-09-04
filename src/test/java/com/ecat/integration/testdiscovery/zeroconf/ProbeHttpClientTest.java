@@ -8,6 +8,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
@@ -153,5 +154,27 @@ public class ProbeHttpClientTest {
                 .pullDataAsync("127.0.0.1", 1, ProbeHttpServer.AUTH_ACCOUNT, ProbeHttpServer.AUTH_PASSWORD);
         assertNull("不可达端口 → CF 正常完成 null（消费方据此置 OFFLINE）",
                 future.get(10, TimeUnit.SECONDS));
+    }
+
+    @Test
+    public void testPullData_SendsBasicAuthorizationHeaderExactForm() throws Exception {
+        // 直证客户端确实在 /data 请求上带标准 Basic 头（受探 server 捕获原值比对 RFC 7617 形态）
+        int port;
+        try (ServerSocket s = new ServerSocket(0)) {
+            port = s.getLocalPort();
+        }
+        ProbeHttpServer server = new ProbeHttpServer(port);
+        server.start();
+        try {
+            assertNotNull("正确凭证应拉到数据", ProbeHttpClient.pullData(
+                    "127.0.0.1", port, ProbeHttpServer.AUTH_ACCOUNT, ProbeHttpServer.AUTH_PASSWORD));
+            String expected = "Basic " + java.util.Base64.getEncoder().encodeToString(
+                    (ProbeHttpServer.AUTH_ACCOUNT + ":" + ProbeHttpServer.AUTH_PASSWORD)
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            assertEquals("Authorization 头应为标准 Basic 形态: " + server.getLastAuthorizationHeader(),
+                    expected, server.getLastAuthorizationHeader());
+        } finally {
+            server.stop();
+        }
     }
 }

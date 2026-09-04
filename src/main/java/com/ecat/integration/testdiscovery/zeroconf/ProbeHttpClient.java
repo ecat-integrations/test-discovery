@@ -12,14 +12,10 @@ package com.ecat.integration.testdiscovery.zeroconf;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
 import com.ecat.core.Task.NamedThreadFactory;
+import com.ecat.integration.HttpServerIntegration.httpclient.EasyHttpClient;
+import com.ecat.integration.HttpServerIntegration.httpclient.EasyHttpResponse;
+import com.ecat.integration.HttpServerIntegration.httpclient.auth.BasicAuth;
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -27,9 +23,13 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+import com.ecat.core.Utils.Log;
+import com.ecat.core.Utils.LogFactory;
+
 /**
  * zeroconf 闭环的 HTTP 客户端：探活（{@link #probe}）+ 凭证拉数据（{@link #pullData} 同步 /
- * {@link #pullDataAsync} 异步）。
+ * {@link #pullDataAsync} 异步）。传输层经 {@code integration-httpserver} 的 {@link EasyHttpClient}
+ * （端点串行/超时执法/Basic 认证内建），不再手写 {@code HttpURLConnection}。
  *
  * <p>{@link #probe}：discovery 命中后，flow 的 probe 步用预填的 ip/port + TXT 声明的 model/sn 调用，
  * 真连 {@code http://ip:port/identify}——只信应答、不只信广播。任何失败（连接拒绝/超时/状态码非 200/
@@ -37,13 +37,15 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>{@link #pullData}：入网后的仿真设备用 entry 内的账号密码带 HTTP Basic Auth 真连
  * {@code http://ip:port/data}，拉取传感器数据（temperature/humidity/rssi）——构成"凭证访问设备拉数据"
- * 的真实示例。凭证无效(401)/不可达/解析失败 → 返回 null（设备置 OFFLINE，不静默兜底）。
+ * 的真实示例。Basic 头由 SDK {@link BasicAuth} 生成（RFC 7617 标准形态）。凭证无效(401)/不可达/
+ * 解析失败 → 返回 null（设备置 OFFLINE，不静默兜底）。
  *
- * <p>{@link #pullDataAsync}：HttpPolling round 体专用形态——阻塞 HttpURLConnection 经
- * {@link #IO_CARRIER} 专用载体执行，调用线程（SDK 定时线程 ecat-http-sched）零阻塞，完成语义与
- * {@link #pullData} 一致（失败完成携带 null，非异常通道）。
+ * <p>{@link #pullDataAsync}：HttpPolling round 体专用形态——阻塞请求经 {@link #IO_CARRIER} 专用载体
+ * 执行，调用线程（SDK 定时线程 ecat-http-sched）零阻塞，完成语义与 {@link #pullData} 一致
+ * （失败完成携带 null，非异常通道）。
  *
- * <p>纯 JDK {@link HttpURLConnection} + fastjson2，无外部依赖。
+ * <p>生命周期：本类是无宿主静态工具，客户端与进程同寿命——用恒活宿主绑 {@link EasyHttpClient} 的
+ * 内部池（SDK 要求池生命周期挂宿主防泄漏；进程级工具没有"停止"时刻，宿主 onRemove 永不触发即语义正确）。
  *
  * @author coffee
  */
@@ -52,8 +54,11 @@ public final class ProbeHttpClient {
     private static final int CONNECT_TIMEOUT_MS = 3000;
     private static final int READ_TIMEOUT_MS = 3000;
 
+    /** 失败路径 WARN 用（返 null 契约不变，日志留「凭证错还是不可达」的运维线索）。 */
+    private static final Log log = LogFactory.getLogger(ProbeHttpClient.class);
+
     /**
-     * 凭证拉数据的专用 IO 载体（W1-2 迁移）：阻塞 HttpURLConnection 不许钉 SDK 定时线程
+     * 凭证拉数据的专用 IO 载体（W1-2 迁移）：阻塞请求不许钉 SDK 定时线程
      * （ecat-http-sched，池仅 2 条且承担全部 http 域定时）、不许 commonPool / 引擎 worker——
      * 端点死时 3s+3s 超时上界内只占用本载体。fixedDelay 轮询每设备至多 1 在飞轮，
      * 队列长度天然有界（≤设备数），固定 2 条守护线程足够。daemon：测试/进程退出不滞留。
@@ -61,6 +66,18 @@ public final class ProbeHttpClient {
     private static final ExecutorService IO_CARRIER = new ThreadPoolExecutor(
             2, 2, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(),
             new NamedThreadFactory("tdisc-probe-io", true));
+
+    /**
+     * 进程级共享客户端：与进程同寿命的静态工具没有卸载语义，恒活宿主即正确建模；
+     * 端点串行锁按 host:port 公平互斥，多个仿真设备并发拉数据互不撕裂。
+     */
+    private static final EasyHttpClient HTTP = EasyHttpClient.on(action -> {
+                // 恒活宿主：静态工具与进程同寿命，onRemove 永不触发（见类 Javadoc 生命周期段）
+            })
+            .name("test-discovery-probe")
+            .connectTimeout(CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .readTimeout(READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .build();
 
     private ProbeHttpClient() {
     }
@@ -75,31 +92,17 @@ public final class ProbeHttpClient {
      * @return true 仅当 HTTP 200 且应答 model/sn 与预期完全一致；否则 false（含任何异常）
      */
     public static boolean probe(String ip, int port, String expectedModel, String expectedSn) {
-        HttpURLConnection conn = null;
         try {
-            URL url = new URL("http://" + ip + ":" + port + ProbeHttpServer.IDENTIFY_PATH);
-            conn = (HttpURLConnection) url.openConnection();
-            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
-            conn.setReadTimeout(READ_TIMEOUT_MS);
-            conn.setRequestMethod("GET");
-            int code = conn.getResponseCode();
-            if (code != 200) {
+            EasyHttpResponse r = HTTP.get("http://" + ip + ":" + port + ProbeHttpServer.IDENTIFY_PATH).send();
+            if (!r.is2xx()) {
                 return false;
             }
-            String body;
-            try (InputStream is = conn.getInputStream()) {
-                body = readAll(is);
-            }
-            JSONObject json = JSON.parseObject(body);
+            JSONObject json = JSON.parseObject(r.body());
             return expectedModel.equals(json.getString("model"))
                     && expectedSn.equals(json.getString("sn"));
         } catch (Exception e) {
             // 不可达 / 超时 / 解析失败 → 探活失败（调用方 ABORT）
             return false;
-        } finally {
-            if (conn != null) {
-                conn.disconnect();
-            }
         }
     }
 
@@ -113,36 +116,25 @@ public final class ProbeHttpClient {
      * @return 解析后的传感器数据；HTTP 非 200（含 401 凭证无效）/ 不可达 / 解析失败 → null
      */
     public static SensorData pullData(String ip, int port, String account, String password) {
-        HttpURLConnection conn = null;
         try {
-            URL url = new URL("http://" + ip + ":" + port + ProbeHttpServer.DATA_PATH);
-            conn = (HttpURLConnection) url.openConnection();
-            conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
-            conn.setReadTimeout(READ_TIMEOUT_MS);
-            conn.setRequestMethod("GET");
-            String basic = Base64.getEncoder().encodeToString(
-                    (account + ":" + password).getBytes(StandardCharsets.UTF_8));
-            conn.setRequestProperty("Authorization", "Basic " + basic);
-            int code = conn.getResponseCode();
-            if (code != 200) {
-                return null; // 401 凭证无效 / 其他非 200 → 拉取失败
+            // 请求级认证（而非客户端默认）：探活不带凭证、拉数据带，两形态共用同一客户端
+            EasyHttpResponse r = HTTP.get("http://" + ip + ":" + port + ProbeHttpServer.DATA_PATH)
+                    .auth(BasicAuth.of(account, password))
+                    .send();
+            if (!r.is2xx()) {
+                // 401 凭证无效 / 其他非 200 → 拉取失败（设备置 OFFLINE）；WARN 留运维线索：凭证错还是端点异常
+                log.warn("凭证拉数据非 2xx → OFFLINE: {}:{} httpStatus={}", ip, port, r.getStatus());
+                return null;
             }
-            String body;
-            try (InputStream is = conn.getInputStream()) {
-                body = readAll(is);
-            }
-            JSONObject json = JSON.parseObject(body);
+            JSONObject json = JSON.parseObject(r.body());
             return new SensorData(
                     json.getFloatValue("temperature"),
                     json.getFloatValue("humidity"),
                     json.getFloatValue("rssi"));
         } catch (Exception e) {
-            // 不可达 / 超时 / 解析失败 → 拉取失败（设备置 OFFLINE）
+            // 不可达 / 超时 / 解析失败 → 拉取失败（设备置 OFFLINE）；WARN 留运维线索：与凭证错误区分
+            log.warn("凭证拉数据不可达/解析失败 → OFFLINE: {}:{} {}", ip, port, e.getMessage());
             return null;
-        } finally {
-            if (conn != null) {
-                conn.disconnect();
-            }
         }
     }
 
@@ -181,15 +173,5 @@ public final class ProbeHttpClient {
             this.humidity = humidity;
             this.rssi = rssi;
         }
-    }
-
-    private static String readAll(InputStream is) throws IOException {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        byte[] buf = new byte[1024];
-        int n;
-        while ((n = is.read(buf)) != -1) {
-            bos.write(buf, 0, n);
-        }
-        return new String(bos.toByteArray(), StandardCharsets.UTF_8);
     }
 }

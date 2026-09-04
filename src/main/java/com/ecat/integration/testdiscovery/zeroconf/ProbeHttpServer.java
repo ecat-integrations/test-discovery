@@ -61,6 +61,8 @@ public class ProbeHttpServer {
 
     private final Random rnd = new Random();
     private EasyHttpServer server;
+    /** 最近一次 /data 请求的 Authorization 头原值（null=未收到）；单测直证客户端确实带 Basic 头，生产路径零消费。 */
+    private volatile String lastAuthorizationHeader;
     /** 监听端口（默认 {@link #PORT}；包内可覆写供单测用随机端口，不与常驻 demo 冲突）。 */
     private final int listenPort;
 
@@ -102,12 +104,18 @@ public class ProbeHttpServer {
         return server;
     }
 
+    /** 包内测试读取最近一次 /data 请求的 Authorization 头（Basic 头形态直证）。 */
+    String getLastAuthorizationHeader() {
+        return lastAuthorizationHeader;
+    }
+
     /**
      * 处理 {@code GET /data}：Basic Auth 校验 → 通过回传感器数据（带轻微变化），否则 401。
      * <p>严格模式：凭证缺失/不符/格式错一律 401，不静默放行。
      */
     private void handleDataRequest(EasyHttpExchange exchange) throws IOException {
         String auth = exchange.getRequestHeaders().getFirst("Authorization");
+        lastAuthorizationHeader = auth;
         if (!isBasicAuthValid(auth)) {
             Map<String, Object> err = new HashMap<String, Object>();
             err.put("error", "unauthorized");
