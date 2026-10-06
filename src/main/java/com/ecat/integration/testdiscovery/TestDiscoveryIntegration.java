@@ -67,6 +67,8 @@ public class TestDiscoveryIntegration extends IntegrationDeviceBase {
 
     /** zeroconf 测试服务类型（广播/订阅用）*/
     private static final String ZEROCONF_SERVICE_TYPE = "_ecat-test._tcp.local.";
+    /** 升级链 e2e 可见标记：客户端经升级功能吃到本版本后，运行面（onLoad 启动日志）可断言新代码真实执行。 */
+    public static final String UPGRADE_E2E_MARKER = "test-discovery-visible-change-4.0.1";
     /** zeroconf 闭环预期 uniqueId（与广播 TXT sn + flow 前缀约定）*/
     public static final String EXPECTED_ZEROCONF_UNIQUE_ID = "testdiscovery_zeroconf001";
 
@@ -97,6 +99,7 @@ public class TestDiscoveryIntegration extends IntegrationDeviceBase {
         probeServer.start();
         log.info("[test-discovery] probe HTTP server 已启动: 0.0.0.0:{} (GET {})",
                 ProbeHttpServer.PORT, ProbeHttpServer.IDENTIFY_PATH);
+        log.info("[test-discovery] UPGRADE_E2E_MARKER={}", UPGRADE_E2E_MARKER);
 
         // 起 zeroconf 广播方（长期常驻 + 周期重新广播）——与 ProbeHttpServer 同级、集成生命周期内常驻。
         // 即使设备已添加也持续周期广播，刻意制造"已添加设备重复广播"压测 core 去重（R5/R12）鲁棒性。
